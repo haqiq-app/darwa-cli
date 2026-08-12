@@ -7,7 +7,7 @@ import { homedir, hostname, platform } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { deflateRawSync } from "node:zlib";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const DEFAULT_API = "https://api.darwa.com/api/v1";
 const CONFIG_DIR = process.env.DARWA_CONFIG_DIR || join(homedir(), ".config", "darwa");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
@@ -22,6 +22,12 @@ function out(message = "") { process.stdout.write(`${message}\n`); }
 function err(message = "") { process.stderr.write(`${message}\n`); }
 function sleep(ms) { return new Promise(resolvePromise => setTimeout(resolvePromise, ms)); }
 function apiBase(config = {}) { return String(process.env.DARWA_API_URL || config.apiUrl || DEFAULT_API).replace(/\/$/, ""); }
+function webBase(config = {}) {
+  if (process.env.DARWA_WEB_URL || config.webUrl) return String(process.env.DARWA_WEB_URL || config.webUrl).replace(/\/$/, "");
+  const apiUrl = apiBase(config);
+  if (/^https?:\/\/localhost:8000(?:\/|$)/.test(apiUrl)) return "http://localhost:3080";
+  return "https://darwa.com";
+}
 
 async function loadConfig() {
   try { return JSON.parse(await readFile(CONFIG_FILE, "utf8")); }
@@ -98,7 +104,14 @@ async function login(args) {
       apiUrl, method: "POST", body: { device_code: started.device_code },
     });
     if (result.status !== "authorized") continue;
-    await saveConfig({ ...current, apiUrl, token: result.access_token, user: result.user, expiresAt: Date.now() + result.expires_in * 1000 });
+    await saveConfig({
+      ...current,
+      apiUrl,
+      webUrl: new URL(started.verification_uri).origin,
+      token: result.access_token,
+      user: result.user,
+      expiresAt: Date.now() + result.expires_in * 1000,
+    });
     out(`✓ Logged in as ${result.user.email}`);
     return;
   }
@@ -122,14 +135,28 @@ function slugify(value) {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 100) || "website";
 }
 
-async function listProjects() {
+function printTable(headings, rows) {
+  const cells = rows.map(row => row.map(value => String(value ?? "—")));
+  const widths = headings.map((heading, index) => Math.max(heading.length, ...cells.map(row => row[index].length)));
+  const print = row => out(row.map((cell, index) => String(cell).padEnd(widths[index])).join("  "));
+  print(headings); print(widths.map(width => "-".repeat(width))); cells.forEach(print);
+}
+
+function printJson(value) { out(JSON.stringify(value, null, 2)); }
+
+async function listProjects(args = []) {
+  const options = flags(args);
   const auth = await authenticated();
-  const result = await request("/projects?limit=100", auth);
+  const result = await request("/project-folders", auth);
+  if (options.json) return printJson(result);
   if (!result.items.length) { out("No projects yet. Run `darwa projects create <name>`."); return; }
-  const rows = result.items.map(item => [item.slug, item.kind, item.runtime, item.status, item.url || "—"]);
-  const widths = ["PROJECT", "TYPE", "RUNTIME", "STATUS", "URL"].map((heading, index) => Math.max(heading.length, ...rows.map(row => row[index].length)));
-  const print = row => out(row.map((cell, index) => cell.padEnd(widths[index])).join("  "));
-  print(["PROJECT", "TYPE", "RUNTIME", "STATUS", "URL"]); print(widths.map(width => "-".repeat(width))); rows.forEach(print);
+  printTable(["PROJECT", "ENVIRONMENTS", "SERVICES", "LIVE", "REGIONS"], result.items.map(item => [
+    item.slug,
+    item.environments.join(", "),
+    item.service_count,
+    item.live_count,
+    item.regions.join(", ") || "—",
+  ]));
 }
 
 function detectRuntime(directory) {
@@ -143,14 +170,15 @@ function detectRuntime(directory) {
 
 async function createProject(args) {
   const options = flags(args); const name = options._.join(" ").trim();
-  if (!name) throw new CliError("Usage: darwa projects create <name> [--runtime node|php|python|docker]");
+  if (!name) throw new CliError("Usage: darwa projects create <name> [--environment production]");
   const auth = await authenticated();
-  const project = await request("/projects", { ...auth, method: "POST", body: {
-    name, slug: String(options.slug || slugify(name)), kind: String(options.kind || "web_hosting"),
-    runtime: String(options.runtime || detectRuntime(process.cwd())), region: String(options.region || "us-east"),
-    instance_type: String(options.plan || "starter"),
+  const project = await request("/project-folders", { ...auth, method: "POST", body: {
+    name,
+    environment: String(options.environment || "production"),
   }});
-  out(`✓ Created ${project.slug}`); out(`  ${project.kind} · ${project.runtime} · ${project.region}`);
+  if (options.json) return printJson(project);
+  out(`✓ Created project ${project.slug}`);
+  out(`  Next: darwa services create <name> --repo owner/repository --project ${project.slug}`);
 }
 
 async function deleteProject(args) {
@@ -158,8 +186,134 @@ async function deleteProject(args) {
   if (!slug) throw new CliError("Usage: darwa projects delete <project> --yes");
   if (!options.yes) throw new CliError("Deletion is permanent. Re-run with --yes.");
   const auth = await authenticated();
+  await request(`/project-folders/${encodeURIComponent(slug)}`, { ...auth, method: "DELETE" });
+  out(`✓ Deleted project ${slug} and its services`);
+}
+
+async function showProject(args) {
+  const options = flags(args); const slug = options._[0];
+  if (!slug) throw new CliError("Usage: darwa projects show <project>");
+  const auth = await authenticated();
+  const project = await request(`/project-folders/${encodeURIComponent(slug)}`, auth);
+  if (options.json) return printJson(project);
+  out(`${project.name} (${project.slug})`);
+  out(`${project.service_count} services · ${project.live_count} live · ${project.environments.join(", ")}`);
+  if (!project.services.length) { out("\nNo services in this project."); return; }
+  out("");
+  printTable(["SERVICE", "TYPE", "RUNTIME", "STATUS", "SOURCE"], project.services.map(item => [
+    item.slug, item.kind, item.runtime, item.status, item.source_full_name || "local",
+  ]));
+}
+
+async function listServices(args = []) {
+  const options = flags(args); const auth = await authenticated();
+  const result = await request("/projects?limit=100", auth);
+  let items = result.items;
+  if (options.project) {
+    const project = await request(`/project-folders/${encodeURIComponent(String(options.project))}`, auth);
+    items = items.filter(item => item.project_group === project.name);
+  }
+  if (options.json) return printJson({ ...result, items, total: items.length });
+  if (!items.length) { out("No services found. Create one with `darwa services create <name> --repo owner/repository`."); return; }
+  printTable(["SERVICE", "PROJECT", "TYPE", "RUNTIME", "STATUS", "SOURCE"], items.map(item => [
+    item.slug, item.project_group || "—", item.kind, item.runtime, item.status, item.source_full_name || "local",
+  ]));
+}
+
+async function showService(args) {
+  const options = flags(args); const slug = options._[0];
+  if (!slug) throw new CliError("Usage: darwa services show <service>");
+  const auth = await authenticated(); const service = await request(`/projects/${encodeURIComponent(slug)}`, auth);
+  if (options.json) return printJson(service);
+  out(`${service.name} (${service.slug})`);
+  out(`${service.kind} · ${service.runtime} · ${service.status} · ${service.region}`);
+  out(`Project: ${service.project_group || "unassigned"}`);
+  out(`Source: ${service.source_full_name || "local upload"}${service.branch ? `#${service.branch}` : ""}`);
+  if (service.url) out(`URL: ${service.url}`);
+}
+
+async function deleteService(args) {
+  const options = flags(args); const slug = options._[0];
+  if (!slug) throw new CliError("Usage: darwa services delete <service> --yes");
+  if (!options.yes) throw new CliError("Deletion is permanent. Re-run with --yes.");
+  const auth = await authenticated();
   await request(`/projects/${encodeURIComponent(slug)}`, { ...auth, method: "DELETE" });
-  out(`✓ Deleted ${slug}`);
+  out(`✓ Deleted service ${slug}`);
+}
+
+async function githubStatus(args = []) {
+  const options = flags(args); const auth = await authenticated();
+  const statuses = await request("/source-connections", auth);
+  const status = statuses.find(item => item.provider === "github") || { provider: "github", configured: false, connected: false };
+  if (options.json) return printJson(status);
+  if (!status.connected) { out("GitHub is not connected."); out("Run `darwa github connect`."); return; }
+  out(`✓ GitHub connected${status.account_name ? ` as ${status.account_name}` : ""}`);
+}
+
+async function connectGithub(args = []) {
+  const options = flags(args); const auth = await authenticated();
+  const result = await request("/source-connections/github/authorize", { ...auth, method: "POST" });
+  out("Opening GitHub authorization in your browser…"); out(result.authorization_url);
+  if (!options["no-browser"]) openBrowser(result.authorization_url);
+  out(`After approval, return here and run \`darwa github repos\`. Dashboard: ${webBase(auth.config)}/dashboard/projects/new?service=web`);
+}
+
+async function disconnectGithub(args = []) {
+  const options = flags(args);
+  if (!options.yes) throw new CliError("Re-run with --yes to disconnect GitHub.");
+  const auth = await authenticated();
+  await request("/source-connections/github", { ...auth, method: "DELETE" });
+  out("✓ GitHub disconnected");
+}
+
+async function githubRepositories(args = []) {
+  const options = flags(args); const auth = await authenticated();
+  const result = await request("/source-connections/github/repositories", auth);
+  if (options.json) return printJson(result);
+  if (!result.items.length) { out("No repositories are available to this GitHub connection."); return; }
+  printTable(["REPOSITORY", "VISIBILITY", "BRANCH", "LANGUAGE"], result.items.map(item => [
+    item.full_name, item.private ? "private" : "public", item.default_branch, item.language || "—",
+  ]));
+}
+
+async function repositoryByName(auth, requested) {
+  const result = await request("/source-connections/github/repositories", auth);
+  const normalized = requested.toLowerCase();
+  const exact = result.items.find(item => item.full_name.toLowerCase() === normalized || item.id === requested);
+  if (exact) return exact;
+  const byName = result.items.filter(item => item.name.toLowerCase() === normalized);
+  if (byName.length === 1) return byName[0];
+  throw new CliError(`Repository \`${requested}\` was not found. Run \`darwa github repos\` to see connected repositories.`);
+}
+
+async function createService(args) {
+  const options = flags(args); const name = options._.join(" ").trim();
+  if (!name) throw new CliError("Usage: darwa services create <name> --repo owner/repository [--project project]");
+  if (!options.repo) {
+    await githubRepositories(args.filter(value => value !== name));
+    throw new CliError("Choose a repository, then re-run with `--repo owner/repository`.");
+  }
+  const auth = await authenticated(); const repository = await repositoryByName(auth, String(options.repo));
+  let projectGroup;
+  if (options.project) {
+    const project = await request(`/project-folders/${encodeURIComponent(String(options.project))}`, auth);
+    projectGroup = project.name;
+  }
+  const service = await request("/source-connections/github/import", { ...auth, method: "POST", body: {
+    repository_id: repository.id,
+    name,
+    branch: options.branch ? String(options.branch) : repository.default_branch,
+    kind: String(options.kind || "web_service"),
+    runtime: String(options.runtime || "node"),
+    region: String(options.region || "us-east"),
+    instance_type: String(options.plan || "starter"),
+    environment: String(options.environment || "production"),
+    project_group: projectGroup,
+    root_directory: options.root ? String(options.root) : null,
+  }});
+  if (options.json) return printJson(service);
+  out(`✓ Created service ${service.slug} from ${repository.full_name}`);
+  out(`  ${service.runtime} · ${service.region} · ${service.status}`);
 }
 
 const crcTable = Array.from({ length: 256 }, (_, number) => {
@@ -237,7 +391,7 @@ async function deploy(args) {
 }
 
 function help() {
-  out(`Darwa CLI ${VERSION}\n\nUsage:\n  darwa login [--api URL]\n  darwa logout\n  darwa whoami\n  darwa projects list\n  darwa projects create <name> [--runtime node|php|python|docker] [--plan starter]\n  darwa projects delete <project> --yes\n  darwa deploy [directory] [--project slug] [--clear-cache] [--no-wait]\n\nEnvironment:\n  DARWA_API_URL       Override the API endpoint\n  DARWA_CONFIG_DIR     Override credential storage`);
+  out(`Darwa CLI ${VERSION}\n\nUsage:\n  darwa login [--api URL]\n  darwa logout\n  darwa whoami\n\n  darwa projects list [--json]\n  darwa projects create <name> [--environment production]\n  darwa projects show <project> [--json]\n  darwa projects delete <project> --yes\n\n  darwa github status\n  darwa github connect [--no-browser]\n  darwa github repos [--json]\n  darwa github disconnect --yes\n\n  darwa services list [--project project] [--json]\n  darwa services create <name> --repo owner/repository [--project project]\n      [--branch main] [--runtime node|php|python|docker] [--region us-east]\n  darwa services show <service> [--json]\n  darwa services delete <service> --yes\n\n  darwa deploy [directory] [--project service] [--clear-cache] [--no-wait]\n\nEnvironment:\n  DARWA_API_URL        Override the API endpoint\n  DARWA_WEB_URL        Override the dashboard endpoint\n  DARWA_CONFIG_DIR     Override credential storage`);
 }
 
 async function main() {
@@ -248,9 +402,18 @@ async function main() {
   if (command === "logout") return logout();
   if (command === "whoami") return whoami();
   if (command === "deploy") return deploy([subcommand, ...rest].filter(Boolean));
-  if (command === "projects" && subcommand === "list") return listProjects();
+  if (command === "projects" && ["list", "ls"].includes(subcommand)) return listProjects(rest);
   if (command === "projects" && subcommand === "create") return createProject(rest);
+  if (command === "projects" && ["show", "get"].includes(subcommand)) return showProject(rest);
   if (command === "projects" && subcommand === "delete") return deleteProject(rest);
+  if (command === "services" && ["list", "ls"].includes(subcommand)) return listServices(rest);
+  if (command === "services" && subcommand === "create") return createService(rest);
+  if (command === "services" && ["show", "get"].includes(subcommand)) return showService(rest);
+  if (command === "services" && subcommand === "delete") return deleteService(rest);
+  if (command === "github" && subcommand === "status") return githubStatus(rest);
+  if (command === "github" && subcommand === "connect") return connectGithub(rest);
+  if (command === "github" && ["repos", "repositories"].includes(subcommand)) return githubRepositories(rest);
+  if (command === "github" && subcommand === "disconnect") return disconnectGithub(rest);
   throw new CliError(`Unknown command. Run \`darwa help\`.`);
 }
 

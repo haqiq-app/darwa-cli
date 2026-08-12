@@ -1,6 +1,6 @@
 {
   "name": "@darwa/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Deploy and manage Darwa projects from your terminal",
   "homepage": "https://github.com/haqiq-app/darwa-cli#readme",
   "repository": {
