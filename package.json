@@ -1,0 +1,22 @@
+{
+  "name": "@darwa/cli",
+  "version": "0.1.0",
+  "description": "Deploy and manage Darwa projects from your terminal",
+  "homepage": "https://github.com/haqiq-app/darwa-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/haqiq-app/darwa-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/haqiq-app/darwa-cli/issues"
+  },
+  "type": "module",
+  "bin": { "darwa": "bin/darwa.js" },
+  "files": ["bin", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check bin/darwa.js"
+  },
+  "license": "UNLICENSED"
+}
