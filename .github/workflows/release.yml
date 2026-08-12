@@ -28,3 +28,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" darwa-cli-*.tgz --generate-notes
+      - name: Update Homebrew tap
+        if: ${{ env.TAP_GITHUB_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          checksum="$(curl -fsSL "$archive" | sha256sum | cut -d ' ' -f 1)"
+          gh repo clone haqiq-app/homebrew-tap tap
+          sed -i "s#url \".*\"#url \"$archive\"#" tap/Formula/darwa.rb
+          sed -i "s#sha256 \".*\"#sha256 \"$checksum\"#" tap/Formula/darwa.rb
+          git -C tap config user.name "Darwa Release Bot"
+          git -C tap config user.email "release-bot@darwa.com"
+          git -C tap add Formula/darwa.rb
+          git -C tap commit -m "darwa $version"
+          git -C tap push
