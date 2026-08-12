@@ -9,7 +9,7 @@ class Darwa < Formula
 
   def install
     libexec.install "bin", "package.json", "README.md"
-    (bin/"darwa").write_env_script libexec/"bin/darwa.js", PATH: "#{Formula["node@22"].opt_bin}:$PATH"
+    (bin/"darwa").write_env_script libexec/"bin/darwa.js", PATH: "#{formula_opt_bin("node@22")}:$PATH"
   end
 
   test do
