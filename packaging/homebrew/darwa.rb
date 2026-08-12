@@ -1,8 +1,8 @@
 class Darwa < Formula
   desc "Deploy and manage Darwa projects from your terminal"
   homepage "https://github.com/haqiq-app/darwa-cli"
-  url "https://github.com/haqiq-app/darwa-cli/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0c41a2f8eff7e96354fb43545b27bec57772e1827b722045e924282613e267f9"
+  url "https://github.com/haqiq-app/darwa-cli/archive/refs/tags/v0.2.0.tar.gz"
+  sha256 "9a519c9857e5ac1d8aa8a604b9fb6f8b689c70be62d4e4c592b7611c58744b18"
   license :cannot_represent
 
   depends_on "node@22"
